@@ -1,16 +1,25 @@
 #!/bin/bash
+FILE=/tmp/custom-command-toggle-test
+PENDING=/tmp/custom-command-toggle-test.pending
+
 
 start() {
-    touch /tmp/custom-command-toggle-test
+    touch $PENDING 
+    (sleep 20;
+    touch $FILE;
+    rm -f $PENDING) &
 }
 
 stop() {
-    rm -f /tmp/custom-command-toggle-test
+    rm -f $FILE
 }
 
 status() {
-    sleep 1
-    if [ -f /tmp/custom-command-toggle-test ]; then
+    if [ -f $PENDING ]; then
+        echo "Custom Command Toggle is starting"
+        exit 2
+    fi
+    if [ -f $FILE ]; then
         echo "Custom Command Toggle is running"
         exit 0
     else

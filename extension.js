@@ -38,6 +38,7 @@ let toggleStates = [];
 let initialStates = [];
 let buttonClicks = [];
 let shortcutIds = [];
+let isPending = [];
 
 for (let i = 0; i < numberOfTogglesAllowed; i++) {
     toggleCommands[i] = { on: "", off: "" };
@@ -45,11 +46,17 @@ for (let i = 0; i < numberOfTogglesAllowed; i++) {
     initialStates[i] = 2;
     buttonClicks[i] = 2;
     shortcutIds[i] = null;
+    isPending[i] = false;
 }
 
 let checkIntervals = []; let commandTimeouts = [];
 let isRunning = [];
 let debug = false;
+
+// Debug logging function
+function debugLog(message) {
+    if (debug) console.log(message);
+}
 
 
 const myQuickToggle = GObject.registerClass(
@@ -92,10 +99,19 @@ function createIndicatorClass(toggleNumber) {
                 this.toggle.checked = toggleStates[idx];
 
                 this.toggleConnectSignal = this.toggle.connect('notify::checked', () => {
+                    // Check if toggle is in pending state (waiting for check command confirmation)
+                    if (isPending[idx]) {
+                        debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Ignoring click while pending`);
+                        GObject.signal_handler_block(this.toggle, this.toggleConnectSignal);
+                        this.toggle.checked = !this.toggle.checked;
+                        GObject.signal_handler_unblock(this.toggle, this.toggleConnectSignal);
+                        return;
+                    }
+
                     if (settings.get_boolean(getSettingKey(toggleNumber, SettingTypes.CLOSE_MENU))) {Main.panel.closeQuickSettings();}
                     if (settings.get_int(getSettingKey(toggleNumber, SettingTypes.BUTTON_CLICK)) === 2 && settings.get_boolean(getSettingKey(toggleNumber, SettingTypes.CHECK_EXIT_CODE))) {
                         checkCommandExitCode(toggleNumber, this.toggle.checked, toggleCommands[idx].on, toggleCommands[idx].off, (exitCodeResult) => {
-                            if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Exit code check: ${exitCodeResult ? 'passed' : 'failed'}${exitCodeResult ? '' : ' (toggle state not changed)'}`);
+                            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Exit code check: ${exitCodeResult ? 'passed' : 'failed'}${exitCodeResult ? '' : ' (toggle state not changed)'}`);
                             if (!exitCodeResult) {
                                 GObject.signal_handler_block(this.toggle, this.toggleConnectSignal);
                                 this.toggle.checked = !this.toggle.checked;
@@ -105,6 +121,15 @@ function createIndicatorClass(toggleNumber) {
                                 this.toggle.iconName = this.toggle.checked ? iconOn : iconOff;
                                 if (!showIndicator) {this._indicator.visible = false;}
                                 GObject.signal_handler_unblock(this.toggle, this.toggleConnectSignal);
+                            } else {
+                                // If check command is configured, enter pending state
+                                const checkCmd = settings.get_string(getSettingKey(toggleNumber, SettingTypes.CHECK_COMMAND));
+                                const checkSync = settings.get_boolean(getSettingKey(toggleNumber, SettingTypes.CHECK_COMMAND_SYNC));
+                                if (checkCmd.trim() !== '' && checkSync) {
+                                    isPending[idx] = true;
+                                    this.toggle.reactive = false;
+                                    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Entering pending state`);
+                                }
                             }
                         });
                     } else {
@@ -112,6 +137,15 @@ function createIndicatorClass(toggleNumber) {
                             case 0: if (this.toggle.checked)  {executeCommand(toggleNumber, this.toggle.checked, toggleCommands[idx].on, toggleCommands[idx].off);} this.toggle.checked = true; break;
                             case 1: if (!this.toggle.checked) {executeCommand(toggleNumber, this.toggle.checked, toggleCommands[idx].on, toggleCommands[idx].off);} this.toggle.checked = false; break;
                             case 2: {executeCommand(toggleNumber, this.toggle.checked, toggleCommands[idx].on, toggleCommands[idx].off);} break;
+                        }
+                        
+                        // If check command is configured, enter pending state
+                        const checkCmd = settings.get_string(getSettingKey(toggleNumber, SettingTypes.CHECK_COMMAND));
+                        const checkSync = settings.get_boolean(getSettingKey(toggleNumber, SettingTypes.CHECK_COMMAND_SYNC));
+                        if (checkCmd.trim() !== '' && checkSync) {
+                            isPending[idx] = true;
+                            this.toggle.reactive = false;
+                            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Entering pending state`);
                         }
                     }
                     toggleStates[idx] = this.toggle.checked;
@@ -137,12 +171,12 @@ for (let i = 1; i <= numberOfTogglesAllowed; i++) {
 //#region Execute Command
 function executeCommand(toggleNumber, toggleChecked, commandChecked, commandUnchecked) {
     let command = toggleChecked ? commandChecked : commandUnchecked;
-    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute toggle command:`);
-    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | ${command.trim() === '' ? '(no command provided)' : command}`);
+    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute toggle command:`);
+    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | ${command.trim() === '' ? '(no command provided)' : command}`);
     if (command.trim() === "") return;
 
     let [success, pid] = GLib.spawn_async(null, ["/usr/bin/env", "bash", "-c", command], null, GLib.SpawnFlags.SEARCH_PATH, null);
-    if (!success && debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
+    if (!success) debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
 }
 //#endregion Execute Command
 
@@ -150,8 +184,8 @@ function executeCommand(toggleNumber, toggleChecked, commandChecked, commandUnch
 //#region Check Exit Code
 function checkCommandExitCode(toggleNumber, toggleChecked, commandChecked, commandUnchecked, exitCodeCallback) {
     let command = toggleChecked ? commandChecked : commandUnchecked;
-    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute toggle command with exit code status check:`);
-    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | ${command.trim() === '' ? '(no command provided)' : command}`);
+    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute toggle command with exit code status check:`);
+    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | ${command.trim() === '' ? '(no command provided)' : command}`);
     if (command.trim() === "") return;
 
     try {
@@ -162,16 +196,16 @@ function checkCommandExitCode(toggleNumber, toggleChecked, commandChecked, comma
                     let exitStatus = GLib.spawn_check_exit_status(status);
                     exitCodeCallback(exitStatus);
                 } catch (e) {
-                    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Exit code check: ${e}`);
+                    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Exit code check: ${e}`);
                     exitCodeCallback(false);
                 }
             });
         } else {
-            if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
+            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
             exitCodeCallback(false);
         }
     } catch (e) {
-        if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Error checking command exit status: ${e}`);
+        debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Error checking command exit status: ${e}`);
         exitCodeCallback(false);
     }
 }
@@ -185,7 +219,7 @@ export default class CustomQuickToggleExtension extends Extension {
         this._settings = this.getSettings();
         debug = this._settings.get_boolean(`debug`);
         let numToggleButtons = this._settings.get_int('numbuttons');
-        if (debug) console.log(`[Custom Command Toggle] `);
+        debugLog(`[Custom Command Toggle] `);
         console.log(`[Custom Command Toggle] Extension enabled | Toggles created: ${numToggleButtons} | Detailed logging: ${debug}`);
 
         refreshIndicator.call(this);
@@ -196,7 +230,7 @@ export default class CustomQuickToggleExtension extends Extension {
                 getSettingKey(i, SettingTypes.KEYBINDING), this._settings, Meta.KeyBindingFlags.NONE, Shell.ActionMode.ALL,
                 () => {
                     const indicator = this[`_indicator${i}`];
-                    if (indicator) indicator.toggle.checked = !indicator.toggle.checked;
+                    if (indicator && !isPending[i - 1]) indicator.toggle.checked = !indicator.toggle.checked;
                 }
             );
         }
@@ -205,8 +239,8 @@ export default class CustomQuickToggleExtension extends Extension {
 
         //#region Settings Connections
         this._settings.connect('changed::force-refresh', () => {
-            if (debug) console.log(`[Custom Command Toggle] `);
-            if (debug) console.log(`[Custom Command Toggle] Rebuilding and reinitializing all toggles`);
+            debugLog(`[Custom Command Toggle] `);
+            debugLog(`[Custom Command Toggle] Rebuilding and reinitializing all toggles`);
 
             // Remove old intervals
             checkIntervals.forEach((id, i) => {
@@ -214,8 +248,9 @@ export default class CustomQuickToggleExtension extends Extension {
                 checkIntervals[i] = 0;
             });
 
-            // Reset running flags
+            // Reset running and pending flags
             isRunning.forEach((_, i) => isRunning[i] = false);
+            isPending.forEach((_, i) => isPending[i] = false);
 
             // Remove pending command timeouts
             commandTimeouts.forEach(id => id && GLib.source_remove(id));
@@ -229,7 +264,7 @@ export default class CustomQuickToggleExtension extends Extension {
 
         for (let i = 1; i <= numToggleButtons; i++) {
             this._settings.connect(`changed::${getSettingKey(i, SettingTypes.ENABLED)}`, () => {
-                if (debug) console.log(`[Custom Command Toggle] Toggle ${i} | ${this._settings.get_boolean(getSettingKey(i, SettingTypes.ENABLED)) ? 'ENABLED' : 'DISABLED'}`);
+                debugLog(`[Custom Command Toggle] Toggle ${i} | ${this._settings.get_boolean(getSettingKey(i, SettingTypes.ENABLED)) ? 'ENABLED' : 'DISABLED'}`);
                 if (this._settings.get_boolean(getSettingKey(i, SettingTypes.ENABLED))) {
                     initialSetup.call(this, i);
                     refreshIndicator.call(this);
@@ -241,6 +276,7 @@ export default class CustomQuickToggleExtension extends Extension {
                     }
 
                     isRunning[i - 1] = false;
+                    isPending[i - 1] = false;
 
                     if (commandTimeouts[i - 1]) {
                         GLib.source_remove(commandTimeouts[i - 1]);
@@ -369,6 +405,7 @@ export default class CustomQuickToggleExtension extends Extension {
         //#region Setup Check Sync
         function setupCheckSync(i, { startup = false } = {}) {
             isRunning[i - 1] = false;
+            isPending[i - 1] = false;
             let toggleStateKey = getSettingKey(i, SettingTypes.STATE);
             let key = this._settings.get_string(getSettingKey(i, SettingTypes.CHECK_REGEX));
             let checkCommandDelayTime = this._settings.get_int(getSettingKey(i, SettingTypes.CHECK_COMMAND_DELAY_TIME));
@@ -381,14 +418,14 @@ export default class CustomQuickToggleExtension extends Extension {
             }
 
             if (!this._settings.get_boolean(getSettingKey(i, SettingTypes.ENABLED))) {
-                if (debug) console.log(`[Custom Command Toggle] Toggle ${i} | Sync skipped (visibility off)`);
+                debugLog(`[Custom Command Toggle] Toggle ${i} | Sync skipped (visibility off)`);
                 return;
             }
 
             isRunning[i - 1] = false;
 
             if (startup) {
-                checkCommandOutput(i, startupCmd, key, (result) => {
+                checkCommandOutput(i, startupCmd, key, (result, pending) => {
                     toggleStates[i - 1] = result;
                     this._settings.set_boolean(toggleStateKey, result);
                     refreshIndicator.call(this);
@@ -397,31 +434,44 @@ export default class CustomQuickToggleExtension extends Extension {
 
             if (this._settings.get_boolean(getSettingKey(i, SettingTypes.CHECK_COMMAND_SYNC))) {
                 let interval = Math.max(1, this._settings.get_int(getSettingKey(i, SettingTypes.CHECK_COMMAND_INTERVAL)));
-                checkCommandOutput(i, cmd, key, (result) => {
-                    if (toggleStates[i - 1] !== result) {
-                        toggleStates[i - 1] = result;
-                        this._settings.set_boolean(toggleStateKey, result);
-                        refreshIndicator.call(this);
+                checkCommandOutput(i, cmd, key, (result, pending) => {
+                        handleCommandResult(result, pending, this);
                     }
-                });
+                );
 
                 checkIntervals[i - 1] = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, interval, () => {
                     if (isRunning[i - 1]) {
-                        if (debug) console.log(`[Custom Command Toggle] Toggle ${i} | Skipping command to avoid overlap`);
+                        debugLog(`[Custom Command Toggle] Toggle ${i} | Skipping command to avoid overlap`);
                         return GLib.SOURCE_CONTINUE;
                     }
 
                     isRunning[i - 1] = true;
-                    checkCommandOutput(i, cmd, key, (result) => {
+                    checkCommandOutput(i, cmd, key, (result, pending) => {
                         isRunning[i - 1] = false;
-                        if (toggleStates[i - 1] !== result) {
-                            toggleStates[i - 1] = result;
-                            this._settings.set_boolean(toggleStateKey, result);
-                            refreshIndicator.call(this);
-                        }
+                        handleCommandResult(result, pending, this);
                     });
                     return GLib.SOURCE_CONTINUE;
                 });
+            }
+
+            function handleCommandResult(result, pending, that) {
+                debugLog(`[Custom Command Toggle] Toggle ${i} | Command check result: ${result} | Pending: ${pending}`);
+                if (!pending) {
+                    if (toggleStates[i - 1] !== result) {
+                        toggleStates[i - 1] = result;
+                        that._settings.set_boolean(toggleStateKey, result);
+                        refreshIndicator.call(that);
+                    }
+                    // Clear pending state if it was set
+                    if (isPending[i - 1]) {
+                        isPending[i - 1] = false;
+                        const indicator = that[`_indicator${i}`];
+                        if (indicator && indicator.toggle) {
+                            indicator.toggle.reactive = true;
+                            debugLog(`[Custom Command Toggle] Toggle ${i} | Exiting pending state`);
+                        }
+                    }
+                }
             }
         }
         //#endregion Check Sync
@@ -430,8 +480,8 @@ export default class CustomQuickToggleExtension extends Extension {
         //#region Check Output
         function checkCommandOutput(toggleNumber, checkCommand, checkRegex, callback) {
 
-            if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute command with output check:`);
-            if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | ${checkCommand.trim() === '' ? '(no command provided)' : checkCommand}`);
+            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Attempting to execute command with output check:`);
+            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | ${checkCommand.trim() === '' ? '(no command provided)' : checkCommand}`);
             let spawnFlags = GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD;
             let useExitCode = (checkRegex.trim() === '');
             try {
@@ -447,8 +497,8 @@ export default class CustomQuickToggleExtension extends Extension {
                 try { if (stderrFd !== -1) GLib.close(stderrFd); } catch (e) {}
                 
                 if (!success) {
-                    if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
-                    callback(false);
+                    debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Failed to spawn command`);
+                    callback(false, false);
                     return;
                 }
 
@@ -460,9 +510,9 @@ export default class CustomQuickToggleExtension extends Extension {
                 const timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
                     if (!didFinish) {
                         const isStartupCmd = checkCommand.trim().startsWith('sleep ');
-                        if (debug && !isStartupCmd) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Timeout waiting for command response`);
+                        if (!isStartupCmd) debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Timeout waiting for command response`);
                         cleanup();
-                        if (!isStartupCmd) callback(false);
+                        if (!isStartupCmd) callback(false, false);
                     }
                     return GLib.SOURCE_REMOVE;
                 });
@@ -504,16 +554,16 @@ export default class CustomQuickToggleExtension extends Extension {
                                                 `(toggle set to ${match ? 'ON' : 'OFF'})`);
                                 }
                                 cleanup();
-                                callback(match);
+                                callback(match, false);
                                 return;
                             }
 
                             chunks.push([...bytes.get_data()]);
                             readNext();
                         } catch (e) {
-                            if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Error reading output: ${e}`);
+                            debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Error reading output: ${e}`);
                             cleanup();
-                            callback(false);
+                            callback(false, false);
                         }
                     });
                 }
@@ -524,17 +574,18 @@ export default class CustomQuickToggleExtension extends Extension {
                     try {
                         GLib.spawn_close_pid(pid);
                     } catch (e) {
-                        if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Error closing process: ${e}`);
+                        debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Error closing process: ${e}`);
                     }
                     cleanup();
                     if (useExitCode) {
-                        callback(status === 0);
+                        debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Command exited with status ${status}`);
+                        callback(status === 0, status === 512);
                     }
                 });
 
             } catch (e) {
-                if (debug) console.log(`[Custom Command Toggle] Toggle ${toggleNumber} | Error running command: ${e}`);
-                callback(false);
+                debugLog(`[Custom Command Toggle] Toggle ${toggleNumber} | Error running command: ${e}`);
+                callback(false, false);
             }
         }//#endregion Check Output
 
@@ -575,6 +626,11 @@ export default class CustomQuickToggleExtension extends Extension {
                 if (this._settings.get_boolean(getSettingKey(i, SettingTypes.ENABLED))) {
                     this[`_indicator${i}`] = new indicatorClasses[i](this.getSettings());
                     Main.panel.statusArea.quickSettings.addExternalIndicator(this[`_indicator${i}`]);
+                    
+                    // Restore pending state if applicable
+                    if (isPending[i - 1]) {
+                        this[`_indicator${i}`].toggle.reactive = false;
+                    }
                 }
             }
         }
